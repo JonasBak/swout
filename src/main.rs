@@ -106,6 +106,7 @@ fn main() {
         .window("rust-sdl2 demo: Video", 800, 600)
         .position_centered()
         .opengl()
+        .resizable()
         .build()
         .map_err(|e| e.to_string())
         .unwrap();
