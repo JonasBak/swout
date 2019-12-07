@@ -43,7 +43,7 @@ fn get_outputs() -> Result<Vec<Output>> {
     return Ok(outputs);
 }
 
-fn set_outputs(moved: MouseTracker, mut outputs: Vec<Output>) -> Vec<Output> {
+fn update_outputs(moved: MouseTracker, mut outputs: Vec<Output>) -> Vec<Output> {
     let mut min_x = moved.pos.0;
     let mut min_y = moved.pos.1;
     for output in outputs.iter_mut() {
@@ -68,11 +68,11 @@ fn set_outputs(moved: MouseTracker, mut outputs: Vec<Output>) -> Vec<Output> {
             )
         })
         .collect();
-    println!("{}", command_arg.join(" "));
+    // TODO check if it's needed to get again
     Command::new("swaymsg")
         .arg(command_arg.join(" "))
         .output()
-        .expect("failed to get outputs from swaymsg");
+        .expect("failed to set outputs");
 
     outputs
 }
@@ -89,6 +89,55 @@ fn check_touched(point: (i32, i32), outputs: &[Output]) -> Option<&Output> {
         }
     }
     None
+}
+
+fn handle_overlap(mut moved: MouseTracker, outputs: &[Output]) -> MouseTracker {
+    let pos = (moved.pos.0 + moved.offset.0, moved.pos.1 + moved.offset.1);
+    let center = (
+        pos.0 + moved.size.0 as i32 / 2,
+        pos.1 + moved.size.1 as i32 / 2,
+    );
+    let mut closest: Option<(i32, &Output)> = None;
+    // Could do closest in x and y, to (maybe) handle corners better
+    for output in outputs.iter() {
+        if output.id != moved.id {
+            let dist_sqr = (output.rect.x + output.rect.width as i32 / 2 - center.0).pow(2)
+                + (output.rect.y + output.rect.height as i32 / 2 - center.1).pow(2);
+            match closest {
+                Some((d, _)) if dist_sqr <= d => {
+                    closest = Some((dist_sqr, output));
+                }
+                None => {
+                    closest = Some((dist_sqr, output));
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some((_, output)) = closest {
+        let overlap_amount_x = moved.size.0 as i32 + output.rect.width as i32
+            - ((pos.0 + moved.size.0 as i32).max(output.rect.x + output.rect.width as i32)
+                - pos.0.min(output.rect.x));
+        let overlap_amount_y = moved.size.1 as i32 + output.rect.height as i32
+            - ((pos.1 + moved.size.1 as i32).max(output.rect.y + output.rect.height as i32)
+                - pos.1.min(output.rect.y));
+        if !(overlap_amount_x < 0 && overlap_amount_y < 0) {
+            if overlap_amount_x < overlap_amount_y {
+                moved.pos.0 += if center.0 < output.rect.x + output.rect.width as i32 / 2 {
+                    -overlap_amount_x
+                } else {
+                    overlap_amount_x
+                };
+            } else {
+                moved.pos.1 += if center.1 < output.rect.y + output.rect.height as i32 / 2 {
+                    -overlap_amount_y
+                } else {
+                    overlap_amount_y
+                };
+            }
+        }
+    }
+    moved
 }
 
 fn main() {
@@ -124,7 +173,6 @@ fn main() {
     let mut selected: Option<MouseTracker> = None;
 
     'running: loop {
-        // Get offset to center in "screen coordinates"
         let center = {
             let window = canvas.window_mut();
             let size = window.size();
@@ -152,8 +200,8 @@ fn main() {
                 .fill_rect(Rect::new(
                     moved.pos.0 + moved.offset.0 + center.0,
                     moved.pos.1 + moved.offset.1 + center.1,
-                    moved.size.0 as u32,
-                    moved.size.1 as u32,
+                    moved.size.0,
+                    moved.size.1,
                 ))
                 .unwrap();
         }
@@ -168,8 +216,8 @@ fn main() {
                 .fill_rect(Rect::new(
                     output.rect.x + center.0,
                     output.rect.y + center.1,
-                    output.rect.width as u32,
-                    output.rect.height as u32,
+                    output.rect.width,
+                    output.rect.height,
                 ))
                 .unwrap();
         }
@@ -184,8 +232,8 @@ fn main() {
                     ..
                 } => break 'running,
                 Event::MouseButtonDown { x, y, .. } => {
-                    let x = x - center.0;
-                    let y = y - center.1;
+                    let x = x * scale as i32 - center.0;
+                    let y = y * scale as i32 - center.1;
                     selected = match check_touched((x, y), &outputs) {
                         Some(output) => Some(MouseTracker {
                             id: output.id,
@@ -198,15 +246,15 @@ fn main() {
                 }
                 Event::MouseButtonUp { .. } => {
                     if let Some(moved) = selected.take() {
-                        outputs = set_outputs(moved, outputs);
+                        outputs = update_outputs(moved, outputs);
                     }
                 }
                 Event::MouseMotion { x, y, .. } => {
-                    let x = x - center.0;
-                    let y = y - center.1;
+                    let x = x * scale as i32 - center.0;
+                    let y = y * scale as i32 - center.1;
                     if let Some(mut moved) = selected.take() {
                         moved.pos = (x, y);
-                        selected = Some(moved);
+                        selected = Some(handle_overlap(moved, &outputs));
                     }
                 }
                 _ => {}
