@@ -25,6 +25,18 @@ struct Output {
     rect: Bounds,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct InactiveOutput {
+    name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TmpOutput {
+    id: Option<u16>,
+    name: String,
+    rect: Bounds,
+}
+
 #[derive(Debug)]
 struct MouseTracker {
     id: u16,
@@ -33,17 +45,47 @@ struct MouseTracker {
     size: (u32, u32),
 }
 
-fn get_outputs() -> Result<Vec<Output>> {
+fn get_outputs() -> Result<(Vec<Output>, Vec<InactiveOutput>)> {
     let raw_output = Command::new("swaymsg")
         .arg("-t")
         .arg("get_outputs")
         .output()
         .expect("failed to get outputs from swaymsg");
-    let outputs: Vec<Output> = serde_json::from_slice(&raw_output.stdout)?;
-    return Ok(outputs);
+    let mut active_outputs: Vec<Output> = Vec::new();
+    let mut inactive_outputs: Vec<InactiveOutput> = Vec::new();
+    let outputs: Vec<TmpOutput> = serde_json::from_slice(&raw_output.stdout)?;
+    for output in outputs.into_iter() {
+        if let Some(id) = output.id {
+            active_outputs.push(Output {
+                id,
+                name: output.name,
+                rect: output.rect,
+            });
+        } else {
+            inactive_outputs.push(InactiveOutput { name: output.name });
+        }
+    }
+
+    return Ok((active_outputs, inactive_outputs));
 }
 
-fn update_outputs(moved: MouseTracker, mut outputs: Vec<Output>) -> Vec<Output> {
+fn set_active(output: &InactiveOutput) -> (Vec<Output>, Vec<InactiveOutput>) {
+    Command::new("swaymsg")
+        .arg(format!("output {} enable", output.name))
+        .output()
+        .expect("failed to get outputs from swaymsg");
+    get_outputs().unwrap()
+}
+
+fn set_inactive(output: &Output) -> (Vec<Output>, Vec<InactiveOutput>) {
+    Command::new("swaymsg")
+        .arg(format!("output {} disable", output.name))
+        .output()
+        .expect("failed to get outputs from swaymsg");
+    get_outputs().unwrap()
+}
+
+fn update_output_position(moved: MouseTracker, mut outputs: Vec<Output>) -> Vec<Output> {
     let mut min_x = moved.pos.0;
     let mut min_y = moved.pos.1;
     for output in outputs.iter_mut() {
@@ -68,13 +110,13 @@ fn update_outputs(moved: MouseTracker, mut outputs: Vec<Output>) -> Vec<Output> 
             )
         })
         .collect();
-    // TODO check if it's needed to get again
+
     Command::new("swaymsg")
         .arg(command_arg.join(" "))
         .output()
         .expect("failed to set outputs");
 
-    outputs
+    get_outputs().unwrap().0
 }
 
 fn check_inside(point: (i32, i32), bounds: &Bounds) -> bool {
@@ -85,6 +127,27 @@ fn check_inside(point: (i32, i32), bounds: &Bounds) -> bool {
 fn check_touched(point: (i32, i32), outputs: &[Output]) -> Option<&Output> {
     for output in outputs.iter() {
         if check_inside(point, &output.rect) {
+            return Some(output);
+        }
+    }
+    None
+}
+
+fn check_inactive_touched(
+    point: (i32, i32),
+    inactive_size: u32,
+    outputs: &[InactiveOutput],
+) -> Option<&InactiveOutput> {
+    for (i, output) in outputs.iter().enumerate() {
+        if check_inside(
+            point,
+            &Bounds {
+                x: i as i32 * inactive_size as i32,
+                y: 0,
+                width: inactive_size,
+                height: inactive_size,
+            },
+        ) {
             return Some(output);
         }
     }
@@ -141,9 +204,11 @@ fn handle_overlap(mut moved: MouseTracker, outputs: &[Output]) -> MouseTracker {
 }
 
 fn main() {
-    let mut outputs = get_outputs().unwrap();
+    let (mut active_outputs, mut inactive_outputs) = get_outputs().unwrap();
 
     let scale = 10.0;
+
+    let inactive_size = 50 * scale as u32;
 
     let colors = vec![(255, 0, 0), (0, 255, 0), (0, 0, 255)];
     let selected_color = (200, 200, 200);
@@ -172,11 +237,13 @@ fn main() {
 
     let mut selected: Option<MouseTracker> = None;
 
+    let mut ctrl_down = false;
+
     'running: loop {
         let center = {
             let window = canvas.window_mut();
             let size = window.size();
-            let output_bounds = outputs.iter().fold((0, 0, 0, 0), |a, b| {
+            let output_bounds = active_outputs.iter().fold((0, 0, 0, 0), |a, b| {
                 (
                     a.0.min(b.rect.x),
                     a.1.min(b.rect.y),
@@ -205,8 +272,8 @@ fn main() {
                 ))
                 .unwrap();
         }
-        // Render all
-        for (i, output) in outputs.iter().enumerate() {
+        // Render active
+        for (i, output) in active_outputs.iter().enumerate() {
             let color = match selected {
                 Some(MouseTracker { id, .. }) if id == output.id => selected_color,
                 _ => colors[i],
@@ -221,6 +288,18 @@ fn main() {
                 ))
                 .unwrap();
         }
+        // Render inactive
+        for (i, _) in inactive_outputs.iter().enumerate() {
+            canvas.set_draw_color(Color::RGB(100, 0, 100));
+            canvas
+                .fill_rect(Rect::new(
+                    inactive_size as i32 * i as i32,
+                    0,
+                    inactive_size as u32,
+                    inactive_size as u32,
+                ))
+                .unwrap();
+        }
         canvas.present();
 
         // Handle events
@@ -231,30 +310,65 @@ fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::MouseButtonDown { x, y, .. } => {
-                    let x = x * scale as i32 - center.0;
-                    let y = y * scale as i32 - center.1;
-                    selected = match check_touched((x, y), &outputs) {
-                        Some(output) => Some(MouseTracker {
-                            id: output.id,
-                            offset: (output.rect.x - x, output.rect.y - y),
-                            pos: (x, y),
-                            size: (output.rect.width, output.rect.height),
-                        }),
-                        _ => None,
+                Event::KeyDown {
+                    keycode: Some(Keycode::LCtrl),
+                    ..
+                } => ctrl_down = true,
+                Event::KeyUp {
+                    keycode: Some(Keycode::LCtrl),
+                    ..
+                } => ctrl_down = false,
+                Event::MouseButtonDown {
+                    x: screen_x,
+                    y: screen_y,
+                    ..
+                } => {
+                    let x = screen_x * scale as i32 - center.0;
+                    let y = screen_y * scale as i32 - center.1;
+                    if ctrl_down {
+                        if let Some(output) = check_inactive_touched(
+                            (screen_x * scale as i32, screen_y * scale as i32),
+                            inactive_size,
+                            &inactive_outputs,
+                        ) {
+                            let (new_active_outputs, new_inactive_outputs) = set_active(&output);
+                            active_outputs = new_active_outputs;
+                            inactive_outputs = new_inactive_outputs;
+                        } else if active_outputs.len() > 1 {
+                            if let Some(output) = check_touched((x, y), &active_outputs) {
+                                let (new_active_outputs, new_inactive_outputs) =
+                                    set_inactive(&output);
+                                active_outputs = new_active_outputs;
+                                inactive_outputs = new_inactive_outputs;
+                            }
+                        }
+                    } else {
+                        selected = match check_touched((x, y), &active_outputs) {
+                            Some(output) => Some(MouseTracker {
+                                id: output.id,
+                                offset: (output.rect.x - x, output.rect.y - y),
+                                pos: (x, y),
+                                size: (output.rect.width, output.rect.height),
+                            }),
+                            _ => None,
+                        }
                     }
                 }
                 Event::MouseButtonUp { .. } => {
                     if let Some(moved) = selected.take() {
-                        outputs = update_outputs(moved, outputs);
+                        active_outputs = update_output_position(moved, active_outputs);
                     }
                 }
-                Event::MouseMotion { x, y, .. } => {
-                    let x = x * scale as i32 - center.0;
-                    let y = y * scale as i32 - center.1;
+                Event::MouseMotion {
+                    x: screen_x,
+                    y: screen_y,
+                    ..
+                } => {
+                    let x = screen_x * scale as i32 - center.0;
+                    let y = screen_y * scale as i32 - center.1;
                     if let Some(mut moved) = selected.take() {
                         moved.pos = (x, y);
-                        selected = Some(handle_overlap(moved, &outputs));
+                        selected = Some(handle_overlap(moved, &active_outputs));
                     }
                 }
                 _ => {}
