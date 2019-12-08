@@ -6,6 +6,7 @@ use sdl2::rect::Rect;
 use sdl2::render::Texture;
 use sdl2::render::TextureCreator;
 use sdl2::render::TextureQuery;
+use sdl2::render::WindowCanvas;
 use sdl2::ttf::Font;
 use sdl2::video::WindowContext;
 
@@ -21,7 +22,8 @@ use std::time::Duration;
 // TODO "export" layout
 
 struct NameTexture<'a> {
-    format: f32,
+    width: u32,
+    height: u32,
     texture: Texture<'a>,
 }
 
@@ -90,7 +92,8 @@ fn get_outputs<'a>(
                 name: output.name,
                 rect: output.rect,
                 name_texture: NameTexture {
-                    format: width as f32 / height as f32,
+                    width,
+                    height,
                     texture,
                 },
             });
@@ -98,7 +101,8 @@ fn get_outputs<'a>(
             inactive_outputs.push(InactiveOutput {
                 name: output.name,
                 name_texture: NameTexture {
-                    format: width as f32 / height as f32,
+                    width,
+                    height,
                     texture,
                 },
             });
@@ -255,6 +259,24 @@ fn handle_overlap(mut moved: MouseTracker, outputs: &[Output]) -> MouseTracker {
     moved
 }
 
+fn render_text_from_name_texture(
+    mut rect: Rect,
+    name_texture: &NameTexture,
+    canvas: &mut WindowCanvas,
+) {
+    let format = name_texture.width as f32 / name_texture.height as f32;
+    rect.set_width(rect.width().min(name_texture.width * 10));
+    rect.set_height(rect.height().min(name_texture.height * 10));
+    if (rect.width() as f32 / rect.height() as f32) < format {
+        rect.set_height((rect.width() as f32 / format) as u32);
+    } else {
+        rect.set_width((format * rect.height() as f32) as u32);
+    }
+    canvas
+        .copy(&name_texture.texture, None, Some(rect))
+        .unwrap();
+}
+
 fn main() {
     let scale = 10.0;
 
@@ -288,7 +310,7 @@ fn main() {
     let font = ttf_context
         .load_font(
             "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-            200,
+            20,
         )
         .unwrap();
 
@@ -337,43 +359,29 @@ fn main() {
         for (i, output) in active_outputs.iter().enumerate() {
             let color = match selected {
                 Some(MouseTracker { id, .. }) if id == output.id => selected_color,
-                _ => colors[i],
+                _ => colors[i % colors.len()],
             };
             canvas.set_draw_color(Color::RGB(color.0, color.1, color.2));
-            let mut rect = Rect::new(
+            let rect = Rect::new(
                 output.rect.x + center.0,
                 output.rect.y + center.1,
                 output.rect.width,
                 output.rect.height,
             );
             canvas.fill_rect(rect).unwrap();
-            if (rect.width() as f32 / rect.height() as f32) < output.name_texture.format {
-                rect.set_height((rect.width() as f32 / output.name_texture.format) as u32);
-            } else {
-                rect.set_width((output.name_texture.format * rect.height() as f32) as u32);
-            }
-            canvas
-                .copy(&output.name_texture.texture, None, Some(rect))
-                .unwrap();
+            render_text_from_name_texture(rect, &output.name_texture, &mut canvas);
         }
         // Render inactive
         for (i, output) in inactive_outputs.iter().enumerate() {
             canvas.set_draw_color(Color::RGB(200, 200, 200));
-            let mut rect = Rect::new(
+            let rect = Rect::new(
                 inactive_size as i32 * i as i32,
                 0,
                 inactive_size as u32,
                 inactive_size as u32,
             );
             canvas.fill_rect(rect).unwrap();
-            if (rect.width() as f32 / rect.height() as f32) < output.name_texture.format {
-                rect.set_height((rect.width() as f32 / output.name_texture.format) as u32);
-            } else {
-                rect.set_width((output.name_texture.format * rect.height() as f32) as u32);
-            }
-            canvas
-                .copy(&output.name_texture.texture, None, Some(rect))
-                .unwrap();
+            render_text_from_name_texture(rect, &output.name_texture, &mut canvas);
         }
         canvas.present();
 
